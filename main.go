@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"image"
+	"image/color"
 	"log"
 	"os"
 	"os/exec"
@@ -8,8 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"github.com/tailscale/walk"
+	"github.com/tailscale/win"
+	"golang.org/x/image/draw"
 	"golang.org/x/sys/windows"
 	"gopkg.in/ini.v1"
 )
@@ -70,7 +76,7 @@ func main() {
 	// Optional icons, tried only once, and may fail to load
 	iconProvider := NewIconProvider(iconBase)
 	defer iconProvider.Dispose()
-	iconStopped, iconFailed := iconProvider.StoppedIcon(), iconProvider.FailedIcon()
+	iconStopped, iconFailed := iconProvider.StoppedIcon, iconProvider.FailedIcon
 
 	ni, err := walk.NewNotifyIcon()
 	if err != nil {
@@ -130,7 +136,7 @@ func main() {
 				procStopFunc = func() {}
 				updateContextMenuFunc(false, false)
 				updateTooltipFunc("starting")
-				updateIconFunc(iconStopped)
+				updateIconFunc(iconStopped(ni.DPI()))
 			})
 		},
 		runningCb: func(stop func()) {
@@ -144,11 +150,11 @@ func main() {
 		stoppedCb: func(err error) {
 			app.Synchronize(func() {
 				procStopFunc = func() {}
-				tooltip, icon := "stopped", iconStopped
+				tooltip, iconForDPI := "stopped", iconStopped
 
 				if !stopping {
 					if err != nil {
-						tooltip, icon = "failed", iconFailed
+						tooltip, iconForDPI = "failed", iconFailed
 						_ = ni.ShowWarning("App failed", "App failed unexpectedly: "+err.Error())
 					} else {
 						_ = ni.ShowWarning("App exited", "App exited unexpectedly")
@@ -158,7 +164,7 @@ func main() {
 
 				updateContextMenuFunc(true, false)
 				updateTooltipFunc(tooltip)
-				updateIconFunc(icon)
+				updateIconFunc(iconForDPI(ni.DPI()))
 			})
 		},
 	}
@@ -186,26 +192,117 @@ func main() {
 }
 
 type IconProvider struct {
+	baseIcon *walk.Icon
+
 	stoppedOverlayLoader *LazyIconLoader
-	stoppedIcon          walk.Image
-	failedOverlayLoader  *LazyIconLoader
-	failedIcon           walk.Image
+	stoppedIconDrawer    func(dpi int) *walk.Icon
+	stoppedIconForDPI    map[int]*walk.Icon
+
+	failedOverlayLoader *LazyIconLoader
+	failedIconDrawer    func(dpi int) *walk.Icon
+	failedIconForDPI    map[int]*walk.Icon
+
+	disposeOwnedIconsFns []func()
 }
 
 func NewIconProvider(baseIcon *walk.Icon) *IconProvider {
-	drawOverlayScaledFunc := func(overlay *walk.Icon, canvas *walk.Canvas, bounds walk.Rectangle) error {
-		ovw := int(float64(bounds.Width) * 0.625)
-		ovh := int(float64(bounds.Height) * 0.625)
+	rgbaFromBitmapFunc := func(f func() (*walk.Bitmap, error)) (*image.RGBA, error) {
+		icon, err := f()
+		if err != nil {
+			return nil, err
+		}
+		defer icon.Dispose()
 
-		bounds = walk.Rectangle{bounds.Width - ovw, bounds.Height - ovh, ovw, ovh}
-
-		// Looks shit on 100% scale, fix it
-		if canvas.DPI() == 96 {
-			bounds.X += 1
-			bounds.Y += 1
+		rgba, err := icon.ToImage()
+		if err != nil {
+			return nil, err
 		}
 
-		return canvas.DrawImageStretchedPixels(overlay, bounds)
+		return rgba, nil
+	}
+
+	compositeIconFunc := func(baseIcon *walk.Icon, ovlLoader *LazyIconLoader, dpi int) (*walk.Icon, error) {
+		dpiScaledSize := walk.SizeFrom96DPI(walk.Size{16, 16}, dpi)
+
+		baseRgba, err := rgbaFromBitmapFunc(func() (*walk.Bitmap, error) {
+			return walk.NewBitmapFromIconForDPI(baseIcon, dpiScaledSize, dpi)
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		if ovl := ovlLoader.Load(); ovl != nil {
+			ovlRgba, err := rgbaFromBitmapFunc(func() (*walk.Bitmap, error) {
+				return walk.NewBitmapFromIconForDPI(ovl, dpiScaledSize, dpi)
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			bounds := baseRgba.Bounds()
+			bounds.Min = bounds.Min.Add(image.Point{
+				int((1 - 0.625) * float64(bounds.Dx())),
+				int((1 - 0.625) * float64(bounds.Dy())),
+			})
+
+			// Looks shit on 100% scale, fix it
+			if dpi == 96 {
+				bounds.Min.X += 1
+				bounds.Min.Y += 1
+			}
+
+			draw.ApproxBiLinear.Scale(baseRgba, bounds, ovlRgba, ovlRgba.Bounds(), draw.Over, nil)
+		}
+
+		// Convert pixels to non-premultiplied and correct channel order
+		for x := baseRgba.Bounds().Min.X; x < baseRgba.Bounds().Max.X; x++ {
+			for y := baseRgba.Bounds().Min.Y; y < baseRgba.Bounds().Max.Y; y++ {
+				npCol := color.NRGBAModel.Convert(baseRgba.RGBAAt(x, y)).(color.NRGBA)
+				baseRgba.SetRGBA(x, y, color.RGBA{npCol.B, npCol.G, npCol.R, npCol.A})
+			}
+		}
+
+		var bi win.BITMAPV5HEADER
+		bi.BiSize = uint32(unsafe.Sizeof(bi))
+		bi.BiWidth = int32(dpiScaledSize.Width)
+		bi.BiHeight = int32(-dpiScaledSize.Height)
+		bi.BiPlanes = 1
+		bi.BiBitCount = 32
+		bi.BiCompression = win.BI_RGB
+		bi.BV4RedMask = 0x00FF0000
+		bi.BV4GreenMask = 0x0000FF00
+		bi.BV4BlueMask = 0x000000FF
+		bi.BV4AlphaMask = 0xFF000000
+
+		hdcMem := win.CreateCompatibleDC(0)
+		if hdcMem == 0 {
+			return nil, errors.New("CreateCompatibleDC")
+		}
+		defer win.DeleteDC(hdcMem)
+
+		var lpBits unsafe.Pointer
+
+		hbmColor := win.CreateDIBSection(hdcMem, &bi.BITMAPINFOHEADER, win.DIB_RGB_COLORS, &lpBits, 0, 0)
+		if hbmColor == 0 || hbmColor == win.ERROR_INVALID_PARAMETER {
+			return nil, errors.New("CreateDIBSection")
+		}
+		defer win.DeleteObject(win.HGDIOBJ(hbmColor))
+
+		hbmMask := win.CreateBitmap(int32(dpiScaledSize.Width), int32(dpiScaledSize.Height), 1, 1, nil)
+		if hbmMask == 0 {
+			return nil, errors.New("CreateBitmap")
+		}
+		defer win.DeleteObject(win.HGDIOBJ(hbmMask))
+
+		dst := (*[1 << 24]byte)(lpBits)
+		copy(dst[:], baseRgba.Pix)
+
+		var ii win.ICONINFO
+		ii.FIcon = win.TRUE
+		ii.HbmMask = hbmMask
+		ii.HbmColor = hbmColor
+
+		return walk.NewIconFromHICONForDPI(win.CreateIconIndirect(&ii), dpi)
 	}
 
 	stoppedOverlayLoader := NewLazyIconLoader(func() *walk.Icon {
@@ -213,56 +310,67 @@ func NewIconProvider(baseIcon *walk.Icon) *IconProvider {
 		return icon
 	})
 
-	stoppedIcon := walk.NewPaintFuncImage(walk.Size{16, 16}, func(canvas *walk.Canvas, bounds walk.Rectangle) error {
-		bounds = walk.RectangleFrom96DPI(bounds, canvas.DPI())
-
-		if err := canvas.DrawImageStretchedPixels(baseIcon, bounds); err != nil {
-			return err
-		}
-		if ovl := stoppedOverlayLoader.Load(); ovl != nil {
-			return drawOverlayScaledFunc(ovl, canvas, bounds)
-		}
-		return nil
-	})
+	stoppedIconDrawer := func(dpi int) *walk.Icon {
+		icon, _ := compositeIconFunc(baseIcon, stoppedOverlayLoader, dpi)
+		return icon
+	}
 
 	failedOverlayLoader := NewLazyIconLoader(func() *walk.Icon {
 		icon, _ := walk.NewIconFromSysDLLWithSize("imageres", -1402, 15)
 		return icon
 	})
 
-	failedIcon := walk.NewPaintFuncImage(walk.Size{16, 16}, func(canvas *walk.Canvas, bounds walk.Rectangle) error {
-		bounds = walk.RectangleFrom96DPI(bounds, canvas.DPI())
-
-		if err := canvas.DrawImageStretchedPixels(baseIcon, bounds); err != nil {
-			return err
-		}
-		if ovl := failedOverlayLoader.Load(); ovl != nil {
-			return drawOverlayScaledFunc(ovl, canvas, bounds)
-		}
-		return nil
-	})
+	failedIconDrawer := func(dpi int) *walk.Icon {
+		icon, _ := compositeIconFunc(baseIcon, failedOverlayLoader, dpi)
+		return icon
+	}
 
 	return &IconProvider{
+		baseIcon:             baseIcon,
 		stoppedOverlayLoader: stoppedOverlayLoader,
-		stoppedIcon:          stoppedIcon,
+		stoppedIconDrawer:    stoppedIconDrawer,
 		failedOverlayLoader:  failedOverlayLoader,
-		failedIcon:           failedIcon,
+		failedIconDrawer:     failedIconDrawer,
 	}
 }
 
-func (p IconProvider) StoppedIcon() walk.Image {
-	return p.stoppedIcon
+func (p *IconProvider) StoppedIcon(dpi int) (icon *walk.Icon) {
+	if p.stoppedIconForDPI == nil {
+		p.stoppedIconForDPI = make(map[int]*walk.Icon)
+	}
+	return p.cacheIcon(p.stoppedIconForDPI, dpi, p.stoppedIconDrawer)
 }
 
-func (p IconProvider) FailedIcon() walk.Image {
-	return p.failedIcon
+func (p *IconProvider) FailedIcon(dpi int) *walk.Icon {
+	if p.failedIconForDPI == nil {
+		p.failedIconForDPI = make(map[int]*walk.Icon)
+	}
+	return p.cacheIcon(p.failedIconForDPI, dpi, p.failedIconDrawer)
+}
+
+func (p *IconProvider) cacheIcon(cacheMap map[int]*walk.Icon, dpi int, drawerFunc func(dpi int) *walk.Icon) (icon *walk.Icon) {
+	if icon = cacheMap[dpi]; icon != nil {
+		return
+	}
+
+	icon = drawerFunc(dpi)
+	if icon == nil {
+		icon = p.baseIcon
+	} else {
+		p.disposeOwnedIconsFns = append(p.disposeOwnedIconsFns, icon.Dispose)
+	}
+
+	cacheMap[dpi] = icon
+	return icon
 }
 
 func (p IconProvider) Dispose() {
 	p.stoppedOverlayLoader.Dispose()
-	p.stoppedIcon.Dispose()
 	p.failedOverlayLoader.Dispose()
-	p.failedIcon.Dispose()
+
+	for _, disposeFn := range p.disposeOwnedIconsFns {
+		disposeFn()
+	}
 }
 
 type LazyIconLoader struct {
