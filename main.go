@@ -76,7 +76,6 @@ func main() {
 	// Optional icons, tried only once, and may fail to load
 	iconProvider := NewIconProvider(iconBase)
 	defer iconProvider.Dispose()
-	iconStopped, iconFailed := iconProvider.StoppedIcon, iconProvider.FailedIcon
 
 	ni, err := walk.NewNotifyIcon()
 	if err != nil {
@@ -121,8 +120,8 @@ func main() {
 	updateTooltipFunc := func(text string) {
 		_ = ni.SetToolTip(config.Title + " - " + text)
 	}
-	updateIconFunc := func(icon walk.Image) {
-		_ = ni.SetIcon(icon)
+	updateIconFunc := func(dpiFunc func(dpi int) *walk.Icon) {
+		_ = ni.SetIcon(dpiFunc(ni.DPI()))
 	}
 
 	var stopping bool // skips notification
@@ -136,7 +135,7 @@ func main() {
 				procStopFunc = func() {}
 				updateContextMenuFunc(false, false)
 				updateTooltipFunc("starting")
-				updateIconFunc(iconStopped(ni.DPI()))
+				updateIconFunc(iconProvider.StoppedIcon)
 			})
 		},
 		runningCb: func(stop func()) {
@@ -144,17 +143,17 @@ func main() {
 				procStopFunc = stop
 				updateContextMenuFunc(false, true)
 				updateTooltipFunc("running")
-				updateIconFunc(iconBase)
+				updateIconFunc(iconProvider.RunningIcon)
 			})
 		},
 		stoppedCb: func(err error) {
 			app.Synchronize(func() {
 				procStopFunc = func() {}
-				tooltip, iconForDPI := "stopped", iconStopped
+				tooltip, iconForDPI := "stopped", iconProvider.StoppedIcon
 
 				if !stopping {
 					if err != nil {
-						tooltip, iconForDPI = "failed", iconFailed
+						tooltip, iconForDPI = "failed", iconProvider.FailedIcon
 						_ = ni.ShowWarning("App failed", "App failed unexpectedly: "+err.Error())
 					} else {
 						_ = ni.ShowWarning("App exited", "App exited unexpectedly")
@@ -164,7 +163,7 @@ func main() {
 
 				updateContextMenuFunc(true, false)
 				updateTooltipFunc(tooltip)
-				updateIconFunc(iconForDPI(ni.DPI()))
+				updateIconFunc(iconForDPI)
 			})
 		},
 	}
@@ -334,7 +333,11 @@ func NewIconProvider(baseIcon *walk.Icon) *IconProvider {
 	}
 }
 
-func (p *IconProvider) StoppedIcon(dpi int) (icon *walk.Icon) {
+func (p *IconProvider) RunningIcon(dpi int) *walk.Icon {
+	return p.baseIcon
+}
+
+func (p *IconProvider) StoppedIcon(dpi int) *walk.Icon {
 	if p.stoppedIconForDPI == nil {
 		p.stoppedIconForDPI = make(map[int]*walk.Icon)
 	}
