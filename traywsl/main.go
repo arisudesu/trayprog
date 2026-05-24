@@ -231,14 +231,22 @@ func openTerminal(distro string) {
 		return
 	}
 
-	windows.ShellExecute(
-		windows.Handle(0),
-		windows.StringToUTF16Ptr("open"),
-		windows.StringToUTF16Ptr("wsl.exe"),
-		windows.StringToUTF16Ptr("--distribution "+distro+" --cd ~"),
-		nil,
-		windows.SW_SHOWNORMAL,
-	)
+	action, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return
+	}
+
+	exe, err := windows.UTF16PtrFromString("wsl.exe")
+	if err != nil {
+		return
+	}
+
+	exeArgs, err := windows.UTF16PtrFromString("--distribution " + distro + " --cd ~")
+	if err != nil {
+		return
+	}
+
+	windows.ShellExecute(windows.Handle(0), action, exe, exeArgs, nil, windows.SW_SHOWNORMAL)
 }
 
 func terminate(distro string) {
@@ -247,23 +255,39 @@ func terminate(distro string) {
 		return
 	}
 
-	windows.ShellExecute(
-		windows.Handle(0),
-		windows.StringToUTF16Ptr("open"),
-		windows.StringToUTF16Ptr("wsl.exe"),
-		windows.StringToUTF16Ptr("--terminate "+distro),
-		nil,
-		windows.SW_HIDE,
-	)
+	action, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return
+	}
+
+	exe, err := windows.UTF16PtrFromString("wsl.exe")
+	if err != nil {
+		return
+	}
+
+	exeArgs, err := windows.UTF16PtrFromString("--terminate " + distro)
+	if err != nil {
+		return
+	}
+
+	windows.ShellExecute(windows.Handle(0), action, exe, exeArgs, nil, windows.SW_HIDE)
 }
 
 func shutdown() {
-	windows.ShellExecute(
-		windows.Handle(0),
-		windows.StringToUTF16Ptr("open"),
-		windows.StringToUTF16Ptr("wsl.exe"),
-		windows.StringToUTF16Ptr("--shutdown"),
-		nil,
-		windows.SW_HIDE,
-	)
+	action, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return
+	}
+
+	exe, err := windows.UTF16PtrFromString("wsl.exe")
+	if err != nil {
+		return
+	}
+
+	exeArgs, err := windows.UTF16PtrFromString("--shutdown")
+	if err != nil {
+		return
+	}
+
+	windows.ShellExecute(windows.Handle(0), action, exe, exeArgs, nil, windows.SW_HIDE)
 }
