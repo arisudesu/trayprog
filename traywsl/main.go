@@ -93,34 +93,24 @@ func main() {
 		})
 	}
 
-	updateContextMenu := func() error {
+	updateContextMenu := func() {
 		for range actions.Len() - 2 {
-			if err := actions.RemoveAt(0); err != nil {
-				return err
-			}
+			_ = actions.RemoveAt(0)
 		}
 
 		for i, distro := range runningDistros {
 			actionDistroName := walk.NewAction()
-			if err := actionDistroName.SetText(distro); err != nil {
-				return err
-			}
-			if err := actionDistroName.SetEnabled(false); err != nil {
-				return err
-			}
+			_ = actionDistroName.SetText(distro)
+			_ = actionDistroName.SetEnabled(false)
 
 			actionOpenTerminal := walk.NewAction()
-			if err := actionOpenTerminal.SetText("Open terminal"); err != nil {
-				return err
-			}
+			_ = actionOpenTerminal.SetText("Open terminal")
 			actionOpenTerminal.Triggered().Attach(func() {
 				openTerminal(distro)
 			})
 
 			actionTerminate := walk.NewAction()
-			if err := actionTerminate.SetText("Terminate"); err != nil {
-				return err
-			}
+			_ = actionTerminate.SetText("Terminate")
 			actionTerminate.Triggered().Attach(func() {
 				terminate(distro)
 				triggerPollFaster()
@@ -128,20 +118,11 @@ func main() {
 
 			topOffset := i * 4
 
-			if err := actions.Insert(topOffset+0, actionDistroName); err != nil {
-				return err
-			}
-			if err := actions.Insert(topOffset+1, actionOpenTerminal); err != nil {
-				return err
-			}
-			if err := actions.Insert(topOffset+2, actionTerminate); err != nil {
-				return err
-			}
-			if err := actions.Insert(topOffset+3, walk.NewSeparatorAction()); err != nil {
-				return err
-			}
+			_ = actions.Insert(topOffset+0, actionDistroName)
+			_ = actions.Insert(topOffset+1, actionOpenTerminal)
+			_ = actions.Insert(topOffset+2, actionTerminate)
+			_ = actions.Insert(topOffset+3, walk.NewSeparatorAction())
 		}
-		return nil
 	}
 
 	ni.ShowingContextMenu().Attach(func() bool {
