@@ -18,7 +18,11 @@ func init() {
 }
 
 func main() {
-	mutexName, _ := windows.UTF16PtrFromString("TrayAwakeMutex")
+	mutexName, err := windows.UTF16PtrFromString("TrayAwakeMutex")
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	mutex, err := windows.CreateMutex(nil, false, mutexName)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
