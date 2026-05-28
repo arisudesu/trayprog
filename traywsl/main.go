@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/tailscale/walk"
 	"golang.org/x/sys/windows"
@@ -212,22 +213,7 @@ func openTerminal(distro string) {
 		return
 	}
 
-	action, err := windows.UTF16PtrFromString("open")
-	if err != nil {
-		return
-	}
-
-	exe, err := windows.UTF16PtrFromString("wsl.exe")
-	if err != nil {
-		return
-	}
-
-	exeArgs, err := windows.UTF16PtrFromString("--distribution " + distro + " --cd ~")
-	if err != nil {
-		return
-	}
-
-	windows.ShellExecute(windows.Handle(0), action, exe, exeArgs, nil, windows.SW_SHOWNORMAL)
+	executeWSLCommand("--distribution "+distro+" --cd ~", true)
 }
 
 func terminate(distro string) {
@@ -236,39 +222,32 @@ func terminate(distro string) {
 		return
 	}
 
-	action, err := windows.UTF16PtrFromString("open")
-	if err != nil {
-		return
-	}
-
-	exe, err := windows.UTF16PtrFromString("wsl.exe")
-	if err != nil {
-		return
-	}
-
-	exeArgs, err := windows.UTF16PtrFromString("--terminate " + distro)
-	if err != nil {
-		return
-	}
-
-	windows.ShellExecute(windows.Handle(0), action, exe, exeArgs, nil, windows.SW_HIDE)
+	executeWSLCommand("--terminate "+distro, false)
 }
 
 func shutdown() {
-	action, err := windows.UTF16PtrFromString("open")
+	executeWSLCommand("--shutdown", false)
+}
+
+func executeWSLCommand(args string, visible bool) {
+	cmdLine, err := windows.UTF16PtrFromString("wsl.exe " + args)
 	if err != nil {
 		return
 	}
 
-	exe, err := windows.UTF16PtrFromString("wsl.exe")
-	if err != nil {
-		return
+	var si windows.StartupInfo
+	si.Cb = uint32(unsafe.Sizeof(si))
+	si.Flags = windows.STARTF_USESHOWWINDOW
+	if visible {
+		si.ShowWindow = windows.SW_SHOWNORMAL
+	} else {
+		si.ShowWindow = windows.SW_HIDE
 	}
 
-	exeArgs, err := windows.UTF16PtrFromString("--shutdown")
-	if err != nil {
+	var pi windows.ProcessInformation
+	if err := windows.CreateProcess(nil, cmdLine, nil, nil, false, 0, nil, nil, &si, &pi); err != nil {
 		return
 	}
-
-	windows.ShellExecute(windows.Handle(0), action, exe, exeArgs, nil, windows.SW_HIDE)
+	_ = windows.CloseHandle(pi.Thread)
+	_ = windows.CloseHandle(pi.Process)
 }
